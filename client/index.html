@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Realtime UK train map</title>
+		<meta charset="utf-8">
+		<style>
+			html, body {
+				margin: 0; padding: 0;
+				background: #F9F7F5;
+			}
+			
+			.subunit.SCT { fill: #ddc; }
+			.subunit.WLS { fill: #cdd; }
+			.subunit.NIR { fill: #cdc; }
+			.subunit.ENG { fill: #dcd; }
+			.subunit.IRL { display: none; }
+			.subunit-boundary {
+				fill: none;
+				stroke: #777;
+				stroke-dasharray: 2,2;
+				stroke-linejoin: round;
+			}
+
+			.subunit-boundary.IRL {
+				stroke: #aaa;
+			}
+
+			.subunit-label {
+				fill: #777;
+				fill-opacity: .5;
+				font-size: 20px;
+				font-weight: 300;
+				text-anchor: middle;
+			}
+
+			.place, .place-label {
+				fill: #444;
+			}
+
+			text {
+				font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+				font-size: 10px;
+				pointer-events: none;
+			}
+		</style>
+	</head>
+	<body>
+		<script src="d3.v3.min.js"></script>
+		<script src="topojson.v0.min.js"></script>
+		<script>
+			// Scale the width to the current window
+			var width = document.body.offsetWidth-20,
+				height = 1.2*width;
+
+			// Create our SVG "canvas"
+			var svg = d3.select("body").append("svg")
+				.attr("width", width)
+				.attr("height", height);
+
+			// Create the projection for the map, scale to fit the window
+			var projection = d3.geo.albers()
+				.center([1.4, 53.4])
+				.rotate([4.4, 0])
+				.parallels([50, 60])
+				.scale(9.5*width)
+				.translate([width / 2, height / 2]);
+				
+			// Load the topojson UK data
+			d3.json("uk.json", function(error, uk) {
+				// Extract and convert the outline and places data
+				var subunits = topojson.object(uk, uk.objects.subunits);
+				var places = topojson.object(uk, uk.objects.places);
+
+				var path = d3.geo.path().projection(projection).pointRadius(2);
+
+				// Draw countries
+				svg.selectAll(".subunit")
+					.data(topojson.object(uk, uk.objects.subunits).geometries)
+					.enter().append("path")
+					.attr("class", function(d) { return "subunit " + d.id; })
+					.attr("d", path);
+
+				// Draw borders
+				svg.append("path")
+					.datum(topojson.mesh(uk, uk.objects.subunits, function(a, b) { return a !== b && a.id !== "IRL"; }))
+					.attr("d", path)
+					.attr("class", "subunit-boundary");
+
+				// Draw outline of Ireland
+				svg.append("path")
+					.datum(topojson.mesh(uk, uk.objects.subunits, function(a, b) { return a === b && a.id === "IRL"; }))
+					.attr("d", path)
+					.attr("class", "subunit-boundary IRL");
+
+				// Add major city points
+				svg.append("path")
+					.datum(places)
+					.attr("d", path)
+					.attr("class", "place");
+
+				// Add city labels
+				svg.selectAll(".place-label")
+					.data(places.geometries)
+					.enter().append("text")
+					.attr("class", "place-label")
+					.attr("transform", function(d) { return "translate(" + projection(d.coordinates) + ")"; })
+					.attr("x", function(d) { return d.coordinates[0] > -1 ? 6 : -6; })
+					.attr("dy", ".35em")
+					.style("text-anchor", function(d) { return d.coordinates[0] > -1 ? "start" : "end"; })
+					.text(function(d) { return d.properties.name; });
+			});
+		
+		// Create a colour range for ontime vs delayed trains
+		// 0 = ontime, 3,600,000 = delayed by 1 hour (in ms)
+		var color = d3.scale.sqrt()
+			.domain([0, 3600000])
+			.range(["green", "red"]);
+
+		// Connect websocket to load train data
+		var failCount = 0;
+		var connectWs = function () {
+			var websocket = new WebSocket('ws://trains.connorhd.co.uk');
+			websocket.onopen = function(evt) { failCount = 0 };
+			//websocket.onerror = function(evt) { console.log(evt); };
+			websocket.onclose = function(evt) { 
+				// Retry the connection 10 times, with some back-off
+				if (failCount < 10) {
+					setTimeout(function () {
+						connectWs();
+					}, failCount*1000);
+				} else {
+					alert("Can't connect to websocket to load train data, try reloading the page");
+				}
+				failCount++;
+			};
+			// Called when we get train data
+			websocket.onmessage = function(evt) { 
+				var data = JSON.parse(evt.data);
+				var m = projection([data[0], data[1]]);
+				var delay = Math.max(0, data[2]);
+
+				// Create a gradient with a colour based on the delay of the train
+				var id = "gradient"+Math.floor(Math.random()*10000000);
+				var gradient = svg.append('radialGradient').attr("id", id);
+				gradient.append("stop").attr("offset", "0%").attr("stop-color", color(delay))
+				gradient.append("stop").attr("offset", "15%").attr("stop-color", color(delay)).attr("stop-opacity", "0.2");
+				gradient.append("stop").attr("offset", "100%").attr("stop-color", color(delay)).attr("stop-opacity", "0");
+
+				// Create the point to represent the train
+				var point = svg.append("svg:circle")
+					  .attr("cx", m[0])
+					  .attr("cy", m[1])
+					  .attr("r", width/40)
+					.style("fill", 'url(#'+id+')')
+					.style("opacity", 0)
+
+				// Fade the point in
+				setTimeout(function () {
+					point
+					.style("-moz-transition", "opacity 1s linear")
+					.style("-o-transition", "opacity 1s linear")
+					.style("-ms-transition", "opacity 1s linear")
+					.style("-webkit-transition", "opacity 1s linear")
+					.style("transition", "opacity 1s linear")
+						.style("opacity", 0.75)
+
+				}, 100);
+				// Then fade it out
+				setTimeout(function () {
+					point
+						.style("-moz-transition", "opacity 60s cubic-bezier(0.23, 1, 0.32, 1)")
+						.style("-o-transition", "opacity 60s cubic-bezier(0.23, 1, 0.32, 1)")
+						.style("-ms-transition", "opacity 60s cubic-bezier(0.23, 1, 0.32, 1)")
+						.style("-webkit-transition", "opacity 60s cubic-bezier(0.23, 1, 0.32, 1)")
+						.style("transition", "opacity 60s cubic-bezier(0.23, 1, 0.32, 1)")
+						.style("opacity", 0)
+				}, 1100);
+				// Remove the point and graident when it has faded out
+				setTimeout(function () {
+					point.remove();
+					gradient.remove();
+				},61100);
+
+			};
+		};
+		connectWs();
+			
+		
+		</script>
+
+	</body>
+</html>
